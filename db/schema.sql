@@ -1,3 +1,4 @@
+-- db/schema.sql
 -- Supabase schema for Digital Menu MVP
 create table restaurants (
   id uuid primary key default gen_random_uuid(),
