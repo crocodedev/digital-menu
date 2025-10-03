@@ -25,7 +25,6 @@ export type ThemeMode = 'light' | 'dark' | 'brand'
 export default function AdminPage() {
   const router = useRouter()
   const { menu, setMenu, loading, error, fetchMenu } = useAdminMenu()
-  const [newSectionTitle, setNewSectionTitle] = useState('')
   const [themeInput, setThemeInput] = useState<{
     mode: ThemeMode
     brandBackground: string
@@ -244,10 +243,23 @@ export default function AdminPage() {
       <div className="mb-6">
         <label className="block mb-2 font-semibold">Logo:</label>
         <div className="flex items-center gap-4">
+          {previewLogo && (
+            <img
+              src={previewLogo}
+              alt="logo"
+              className="h-16 w-16 object-cover rounded-full border"
+            />
+          )}
 
-            <img src={previewLogo} alt="logo" className="h-16 w-16 object-cover rounded-full border" />
-
-          <input type="file" onChange={handleLogoUpload} />
+          <label className="bg-blue-500 text-white px-3 py-1 rounded cursor-pointer">
+            Add a logo
+            <input
+              type="file"
+              accept="image/*"
+              onChange={handleLogoUpload}
+              className="hidden"
+            />
+          </label>
         </div>
       </div>
 
