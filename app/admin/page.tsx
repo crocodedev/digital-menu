@@ -2,7 +2,7 @@
 
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { QRCodeCanvas } from 'qrcode.react'
 import { useAdminMenu } from '../../hooks/useAdminMenu'
@@ -17,6 +17,8 @@ import {
   updateRestaurantTheme,
 } from '../../lib/adminApi'
 import { supabase } from '../../lib/supabaseClient'
+import SectionModal from '../../components/SectionModal'
+import MenuItemModal from '../../components/MenuItemModal'
 
 export type ThemeMode = 'light' | 'dark' | 'brand'
 
@@ -35,8 +37,15 @@ export default function AdminPage() {
   })
   const [previewLogo, setPreviewLogo] = useState<string | null>(null)
   const [authChecked, setAuthChecked] = useState(false)
-  const [previewSize, setPreviewSize] = useState<'desktop' | 'mobile' | 'tv'>('desktop')
+  const [iframeKey, setIframeKey] = useState(0) // для перерисовки iframe
+  const iframeRef = useRef<HTMLIFrameElement>(null)
 
+  // -------- Модальные окна --------
+  const [sectionModalOpen, setSectionModalOpen] = useState(false)
+  const [editingSection, setEditingSection] = useState<any | null>(null)
+  const [menuItemModalOpen, setMenuItemModalOpen] = useState(false)
+  const [editingItem, setEditingItem] = useState<any | null>(null)
+  const [currentSectionId, setCurrentSectionId] = useState<string | null>(null)
 
   // ------------------ Check auth ------------------
   useEffect(() => {
@@ -46,27 +55,22 @@ export default function AdminPage() {
       } = await supabase.auth.getSession()
 
       if (!session) {
-        router.replace('/login') // redirect unauthorized users
+        router.replace('/login')
       } else {
         setAuthChecked(true)
       }
     }
-
     checkAuth()
   }, [router])
 
   // ------------------ Load menu ------------------
   useEffect(() => {
     if (!authChecked || !menu) return
-
-    // Инициализация themeInput из menu
     setThemeInput({
       mode: (menu.mode as ThemeMode) || 'light',
       brandBackground: menu.brand_background || '#ffffff',
       brandText: menu.brand_text || '#000000',
     })
-
-    // Подгрузка логотипа
     if (menu.logo_path) setPreviewLogo(menu.logo_path)
   }, [menu, authChecked])
 
@@ -94,52 +98,74 @@ export default function AdminPage() {
   if (!menu) return <p>No menu found</p>
 
   // ----------------- Sections -----------------
-  async function handleAddSection() {
-    if (!newSectionTitle) return
-    const { data, error } = await createSection(menu.id, newSectionTitle, menu.menu_sections.length + 1)
-    if (data && !error) {
-      setMenu({ ...menu, menu_sections: [...menu.menu_sections, { ...data[0], menu_items: [] }] })
-      setNewSectionTitle('')
+  async function handleSaveSection(data: { title: string; visible: boolean }) {
+    if (editingSection) {
+      // update
+      const { data: updated } = await updateSection(editingSection.id, data)
+      if (updated && updated.length > 0) {
+        fetchMenu()
+        setIframeKey((k) => k + 1)
+      }
+    } else {
+      // create
+      const { data: created } = await createSection(
+        menu.id,
+        data.title,
+        menu.menu_sections.length + 1
+      )
+      if (created && created.length > 0) {
+        setMenu({
+          ...menu,
+          menu_sections: [
+            ...menu.menu_sections,
+            { ...created[0], menu_items: [] }, // берем именно объект, не массив
+          ],
+        })
+        setIframeKey((k) => k + 1)
+      }
     }
-  }
-
-  async function handleUpdateSection(sectionId: string, updates: Partial<{ title: string; visible: boolean }>) {
-    const { data } = await updateSection(sectionId, updates)
-    if (data) fetchMenu()
   }
 
   async function handleDeleteSection(sectionId: string) {
     const { error } = await deleteSection(sectionId)
-    if (!error) fetchMenu()
+    if (!error) {
+      fetchMenu()
+      setIframeKey((k) => k + 1)
+    }
   }
 
   // ----------------- Menu Items -----------------
-  async function handleAddMenuItem(sectionId: string) {
-    const name = prompt('Item name')
-    if (!name) return
-    const price = parseFloat(prompt('Price') || '0')
-    const { data } = await createMenuItem(sectionId, {
-      name,
-      price,
-      visible: true,
-      tags: [],
-      is_featured: false,
-      is_trending: false,
-    })
-    if (data) fetchMenu()
+  async function handleSaveMenuItem(data: {
+    name: string
+    price: number
+    description: string
+    tags: string[]
+    is_featured: boolean
+    is_trending: boolean
+    visible: boolean
+  }) {
+    if (editingItem) {
+      const { data: updated } = await updateMenuItem(editingItem.id, data)
+      if (updated && updated.length > 0) {
+        fetchMenu()
+        setIframeKey((k) => k + 1)
+      }
+    } else if (currentSectionId) {
+      const { data: created } = await createMenuItem(currentSectionId, data)
+      if (created && created.length > 0) {
+        fetchMenu()
+        setIframeKey((k) => k + 1)
+      }
+    }
   }
 
-  async function handleUpdateMenuItem(itemId: string) {
-    const name = prompt('New item name')
-    if (!name) return
-    const price = parseFloat(prompt('New price') || '0')
-    const { data } = await updateMenuItem(itemId, { name, price })
-    if (data) fetchMenu()
-  }
 
   async function handleDeleteMenuItem(itemId: string) {
     const { error } = await deleteMenuItem(itemId)
-    if (!error) fetchMenu()
+    if (!error) {
+      fetchMenu()
+      setIframeKey((k) => k + 1)
+    }
   }
 
   // ----------------- Logo Upload -----------------
@@ -155,17 +181,14 @@ export default function AdminPage() {
     const filePath = `${menu.id}/${Date.now()}.${fileExt}`
 
     try {
-      const { error: uploadError } = await supabase
-        .storage
-        .from('logos')
-        .upload(filePath, file, { upsert: true })
-
+      const { error: uploadError } = await supabase.storage.from('logos').upload(filePath, file, { upsert: true })
       if (uploadError) throw uploadError
 
       const publicUrl = supabase.storage.from('logos').getPublicUrl(filePath).data.publicUrl
       await updateRestaurantLogo(menu.id, publicUrl)
 
       setMenu((prev) => (prev ? { ...prev, logo_path: publicUrl } : prev))
+      setIframeKey((k) => k + 1)
     } catch (err) {
       console.error('Logo upload error:', err)
     }
@@ -181,8 +204,6 @@ export default function AdminPage() {
       }
 
       const data = await updateRestaurantTheme(menu.id, updatedTheme)
-
-      // Обновляем локально menu с точными именами полей из БД
       if (data && data[0]) {
         const updated = data[0]
         setMenu((prev) =>
@@ -195,11 +216,19 @@ export default function AdminPage() {
               }
             : prev
         )
+        setIframeKey((k) => k + 1)
       }
     } catch (err) {
       console.error('Theme update error:', err)
     }
   }
+
+  // ----------------- Fullscreen trigger -----------------
+  function triggerFullscreen() {
+    iframeRef.current?.contentWindow?.postMessage({ action: 'fullscreen' }, '*')
+  }
+
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || window.location.origin
 
   return (
     <div
@@ -215,11 +244,9 @@ export default function AdminPage() {
       <div className="mb-6">
         <label className="block mb-2 font-semibold">Logo:</label>
         <div className="flex items-center gap-4">
-          {previewLogo ? (
+
             <img src={previewLogo} alt="logo" className="h-16 w-16 object-cover rounded-full border" />
-          ) : (
-            <span className="text-gray-500">Файл не выбран</span>
-          )}
+
           <input type="file" onChange={handleLogoUpload} />
         </div>
       </div>
@@ -260,24 +287,18 @@ export default function AdminPage() {
           </>
         )}
 
-        <button
-          onClick={handleThemeUpdate}
-          className="bg-blue-500 text-white px-3 py-1 rounded"
-        >
+        <button onClick={handleThemeUpdate} className="bg-blue-500 text-white px-3 py-1 rounded">
           Update Theme
         </button>
       </div>
 
       {/* New Section */}
-      <div className="mb-6 flex items-center gap-2">
-        <input
-          placeholder="New Section Title"
-          className="border p-2 rounded flex-1"
-          value={newSectionTitle}
-          onChange={(e) => setNewSectionTitle(e.target.value)}
-        />
+      <div className="mb-6">
         <button
-          onClick={handleAddSection}
+          onClick={() => {
+            setEditingSection(null)
+            setSectionModalOpen(true)
+          }}
           className="bg-blue-500 text-white px-3 py-1 rounded"
         >
           Add Section
@@ -291,31 +312,37 @@ export default function AdminPage() {
             <h2 className="text-xl font-semibold">{section.title}</h2>
             <div className="space-x-2">
               <button
-                onClick={() =>
-                  handleUpdateSection(section.id, { title: prompt('New title', section.title) || section.title })
-                }
+                onClick={() => {
+                  setEditingSection(section)
+                  setSectionModalOpen(true)
+                }}
                 className="bg-yellow-400 px-2 py-1 rounded"
               >
                 Edit
               </button>
-              <button
-                onClick={() => handleDeleteSection(section.id)}
-                className="bg-red-500 px-2 py-1 rounded"
-              >
+              <button onClick={() => handleDeleteSection(section.id)} className="bg-red-500 px-2 py-1 rounded">
                 Delete
               </button>
             </div>
           </div>
 
           <ul className="space-y-2">
-            {section.menu_items?.map((item) => (
-              <li key={item.id} className="flex justify-between border-b border-gray-300 py-1">
-                <span>
-                  {item.name} - ${item.price.toFixed(2)}
+          {section.menu_items?.map((item) => (
+            <li
+              key={item.id}
+              className="flex flex-col border-b border-gray-300 py-2"
+            >
+              {/* Верхняя строка: название и цена */}
+              <div className="flex justify-between items-center">
+                <span className="font-medium">
+                  {item.name}{' '}{item.is_featured && <span className="ml-2 text-yellow-400">★</span>}{item.is_trending && <span className="ml-2 text-pink-400">🔥</span>} - ${item.price.toFixed(2)}
                 </span>
                 <div className="space-x-1">
                   <button
-                    onClick={() => handleUpdateMenuItem(item.id)}
+                    onClick={() => {
+                      setEditingItem(item)
+                      setMenuItemModalOpen(true)
+                    }}
                     className="bg-yellow-300 px-2 py-0.5 rounded text-sm"
                   >
                     Edit
@@ -327,12 +354,37 @@ export default function AdminPage() {
                     Delete
                   </button>
                 </div>
-              </li>
-            ))}
-          </ul>
+              </div>
+
+              {/* Описание, если есть */}
+              {item.description && (
+                <p className="text-sm mt-1">{item.description}</p>
+              )}
+
+              {/* Теги, если есть */}
+              {item.tags?.length > 0 && (
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {item.tags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="text-xs bg-gray-200 px-2 py-0.5 rounded-full"
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+
 
           <button
-            onClick={() => handleAddMenuItem(section.id)}
+            onClick={() => {
+              setEditingItem(null)
+              setCurrentSectionId(section.id)
+              setMenuItemModalOpen(true)
+            }}
             className="mt-2 bg-green-500 text-white px-3 py-1 rounded"
           >
             Add Item
@@ -341,57 +393,23 @@ export default function AdminPage() {
       ))}
 
       {/* Open Fullscreen Display */}
-      <div className="mt-4">
+      <div className="mt-4 space-x-2">
         <button
           onClick={() => window.open(`/display/${menu.slug}`, '_blank')}
           className="bg-purple-600 text-white px-3 py-1 rounded"
         >
-          Open Fullscreen Display
+          Open Display
+        </button>
+        <button onClick={triggerFullscreen} className="bg-pink-600 text-white px-3 py-1 rounded">
+          Trigger Fullscreen on Preview
         </button>
       </div>
 
       {/* -------- Live Preview -------- */}
       <div className="mt-10">
-        <h2 className="text-2xl font-semibold mb-4">Live Preview</h2>
-        <div className="flex gap-2 mb-4">
-          <button
-            onClick={() => setPreviewSize('desktop')}
-            className={`px-3 py-1 rounded ${
-              previewSize === 'desktop' ? 'bg-blue-600 text-white' : 'bg-gray-200'
-            }`}
-          >
-            Desktop
-          </button>
-          <button
-            onClick={() => setPreviewSize('mobile')}
-            className={`px-3 py-1 rounded ${
-              previewSize === 'mobile' ? 'bg-blue-600 text-white' : 'bg-gray-200'
-            }`}
-          >
-            Mobile
-          </button>
-          <button
-            onClick={() => setPreviewSize('tv')}
-            className={`px-3 py-1 rounded ${
-              previewSize === 'tv' ? 'bg-blue-600 text-white' : 'bg-gray-200'
-            }`}
-          >
-            TV
-          </button>
-        </div>
-
-        {/* Preview Frame */}
-        <div className="border rounded-lg overflow-hidden shadow-lg flex justify-center">
-          <iframe
-            src={`/display/${menu.slug}`}
-            className={
-              previewSize === 'mobile'
-                ? 'w-[375px] h-[700px] bg-white'
-                : previewSize === 'tv'
-                ? 'w-[1280px] h-[720px] bg-white'
-                : 'w-full h-[600px] bg-white'
-            }
-          />
+        <h2 className="text-2xl font-semibold mb-4">Live Preview for TV</h2>
+        <div className="border rounded-lg overflow-hidden shadow-lg">
+          <iframe key={iframeKey} ref={iframeRef} src={`/display/${menu.slug}`} className="w-full h-[100vh] bg-white" />
         </div>
       </div>
 
@@ -400,19 +418,31 @@ export default function AdminPage() {
         <h2 className="text-2xl font-semibold mb-4">Mobile Access QR Code</h2>
         <div className="flex flex-col items-center gap-4">
           <QRCodeCanvas
-            value={`${window.location.origin}/display/${menu.slug}`}
+            value={`${siteUrl}/display/${menu.slug}`}
             size={200}
-            bgColor={"#ffffff"}
-            fgColor={"#000000"}
-            level={"H"}
+            bgColor={'#ffffff'}
+            fgColor={'#000000'}
+            level={'H'}
             includeMargin={true}
           />
-          <p className="text-sm text-gray-500">
-            Scan to open menu on your phone
-          </p>
+          <p className="text-sm text-gray-500">Scan to open menu on your phone</p>
         </div>
       </div>
 
+      {/* -------- Модальные окна -------- */}
+      <SectionModal
+        isOpen={sectionModalOpen}
+        onClose={() => setSectionModalOpen(false)}
+        initialData={editingSection ? { title: editingSection.title, visible: editingSection.visible } : undefined}
+        onSave={handleSaveSection}
+      />
+
+      <MenuItemModal
+        isOpen={menuItemModalOpen}
+        onClose={() => setMenuItemModalOpen(false)}
+        initialData={editingItem || undefined}
+        onSave={handleSaveMenuItem}
+      />
     </div>
   )
 }
