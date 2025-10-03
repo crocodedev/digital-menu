@@ -1,4 +1,4 @@
-// hooks/usePollingMenu.ts
+// hook/useAdminMenu.ts
 'use client'
 
 import { useEffect, useState } from 'react'
@@ -23,6 +23,7 @@ export interface MenuSection {
   menu_items: MenuItem[]
 }
 
+// Добавляем поля для бренда и режима
 export type ThemeMode = 'light' | 'dark' | 'brand'
 
 export interface RestaurantMenu {
@@ -32,22 +33,30 @@ export interface RestaurantMenu {
   logo_path: string | null
   theme: any
   menu_sections: MenuSection[]
-  mode: ThemeMode
-  brand_background: string
-  brand_text: string
+  mode: ThemeMode        // <-- добавили
+  brand_background: string // <-- добавили
+  brand_text: string       // <-- добавили
 }
 
-export function usePollingMenu(slug: string, intervalMs: number = 5000) {
+export function useAdminMenu() {
   const [menu, setMenu] = useState<RestaurantMenu | null>(null)
-  const [loading, setLoading] = useState<boolean>(true)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<any>(null)
 
   async function fetchMenu() {
+    setLoading(true)
     try {
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser()
+
+      if (userError) throw userError
+      if (!user) throw new Error('User not found')
+
       const { data, error } = await supabase
         .from('restaurants')
-        .select(
-          `
+        .select(`
           id, name, slug, logo_path, theme,
           mode,
           brand_background,
@@ -58,13 +67,26 @@ export function usePollingMenu(slug: string, intervalMs: number = 5000) {
               id, name, price, description, tags, is_featured, is_trending, visible
             )
           )
-        `
-        )
-        .eq('slug', slug)
+        `)
+        .eq('owner_id', user.id)
         .single()
 
       if (error) throw error
-      setMenu(data as RestaurantMenu)
+
+      // Приводим данные к сериализуемому виду
+      const safeData: RestaurantMenu = {
+        ...data,
+        menu_sections: data.menu_sections.map((section: any) => ({
+          ...section,
+          menu_items: section.menu_items.map((item: any) => ({
+            ...item,
+            price: Number(item.price),
+            description: item.description ?? null,
+          })),
+        })),
+      }
+
+      setMenu(safeData)
       setError(null)
     } catch (err) {
       setError(err)
@@ -74,11 +96,8 @@ export function usePollingMenu(slug: string, intervalMs: number = 5000) {
   }
 
   useEffect(() => {
-    if (!slug) return
     fetchMenu()
-    const interval = setInterval(fetchMenu, intervalMs)
-    return () => clearInterval(interval)
-  }, [slug])
+  }, [])
 
-  return { menu, loading, error }
+  return { menu, setMenu, loading, error, fetchMenu }
 }
